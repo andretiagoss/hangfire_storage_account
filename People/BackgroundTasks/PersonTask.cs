@@ -1,6 +1,8 @@
-﻿using Hangfire.API.Infrastructure.AzureStorage;
+﻿using Azure.Storage.Blobs.Models;
+using Hangfire.API.Infrastructure.AzureStorage;
 using Hangfire.API.People.Models;
 using Hangfire.Common;
+using LinqKit;
 using System.ComponentModel;
 
 namespace Hangfire.API.People.BackgroundTasks
@@ -10,23 +12,26 @@ namespace Hangfire.API.People.BackgroundTasks
         private readonly ILogger<PersonTask> _logger;
         private readonly IRecurringJobManager _recurringJobManager;
         private readonly IAzureStorage _azureStorage;
+        private readonly IConfiguration _configuration;
         private const string JOB_ID = "Remove_Expired_Files";
 
         public PersonTask(
             ILogger<PersonTask> logger,            
             IRecurringJobManager recurringJobManager,
-            IAzureStorage azureStorage)
+            IAzureStorage azureStorage,
+            IConfiguration configuration)
         {
             _logger = logger;
             _recurringJobManager = recurringJobManager;
             _azureStorage = azureStorage;
+            _configuration = configuration;
         }
 
         public void Install()
         {
             _recurringJobManager.AddOrUpdate(
                 JOB_ID,
-                Job.FromExpression(() => RemoveFiles(30)),
+                Job.FromExpression(() => RemoveFiles()),
                 Cron.Daily());
         }
 
@@ -47,7 +52,7 @@ namespace Hangfire.API.People.BackgroundTasks
 
                 var blobContent = AzureBlobHelper.GenerateCsvString(personList);
                 
-                var blobName = $"{code}/{DateTime.UtcNow.ToString("yyyyMMddHHmmssfff")}_PR00_{name}.csv";
+                var blobName = $"{DateTime.UtcNow.ToString("yyyy-MM-dd")}/{DateTime.UtcNow.ToString("yyyyMMddHHmmssfff")}_PR00_{code}.csv";
                 var uploadResponse = await _azureStorage.UploadAsync(blobContent, blobName);
 
                 if (uploadResponse.Error)
@@ -64,22 +69,21 @@ namespace Hangfire.API.People.BackgroundTasks
 
         [DisplayName("Remove Expired Files")]
         [AutomaticRetry(Attempts = 2)]
-        public async Task RemoveFiles(int retentionRate)
+        public async Task RemoveFiles()
         {
             try
             {
                 _logger.LogInformation($"{DateTime.Now.ToString()} - Start process to remove files");
 
+                var retentionRate = _configuration.GetSection("RetentionRateInDays").Get<int>();
+                var retentionRateDate = DateTime.UtcNow.AddDays(-retentionRate);
+
                 var blobList = await _azureStorage.ListAsync();
 
-                foreach (var blobItem in blobList)
-                {
-                    //if (DateTime.Compare(blobItem.CreatedDate.Value.DateTime, DateTime.UtcNow) > retentionRate)
-                    //{
-                        await _azureStorage.DeleteAsync(blobItem.Name);
-                    //}
-                }
-
+                blobList
+                    .Where(a => a.CreatedDate <= retentionRateDate)
+                    .ForEach(async r => await _azureStorage.DeleteAsync(r.Name));
+                
                 _logger.LogInformation($"{DateTime.Now.ToString()} - End process to remove files");                
             }
             catch (Exception ex)
